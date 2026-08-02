@@ -1,0 +1,12 @@
+# 参考数据(dump 脚本生成,几十 MB)
+ref/
+
+# GGUF(软链接 + 60MB 权重)
+*.gguf
+
+# 编译产物
+test_ac
+test_wm
+test_tok
+load_gguf
+*.o
