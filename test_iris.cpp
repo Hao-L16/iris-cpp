@@ -46,6 +46,8 @@ static void cmp(const char * name, const float * got, const char * ref_path, siz
 int main() {
     iris_model m;
     if (!iris_load(m, ".")) return 1;
+    m.n_threads = 8;
+    printf("[iris] n_threads = %d\n", m.n_threads);
 
     // ---------- 1. tokenizer encode ----------
     // ref/tok_input.bin 已经是 mul(2).sub(1) 之后的

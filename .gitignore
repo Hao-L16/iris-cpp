@@ -10,3 +10,5 @@ test_wm
 test_tok
 load_gguf
 *.o
+test_conv1
+trace/
