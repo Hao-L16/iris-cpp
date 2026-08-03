@@ -14,3 +14,5 @@ test_conv1
 trace/
 run_iris
 test_iris
+run_iris
+test_iris
