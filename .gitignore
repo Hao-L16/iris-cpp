@@ -12,3 +12,5 @@ load_gguf
 *.o
 test_conv1
 trace/
+run_iris
+test_iris
