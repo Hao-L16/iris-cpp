@@ -16,6 +16,7 @@
 
 struct ggml_context;
 struct gguf_context;
+struct ggml_tensor;
 
 // ---------------- 常量 ----------------
 namespace iris {
@@ -103,3 +104,24 @@ void iris_wm_forward(iris_model & m,
 void iris_ac_forward(iris_model & m, const float * frame,
                      iris_state & st, float * logits, float * value);
 
+// ------------KV Cache -----------------------
+struct iris_kv_cache {
+    ggml_context * ctx = nullptr;
+    ggml_tensor * k[iris::N_LAYER] = {nullptr};
+    ggml_tensor * v[iris::N_LAYER] = {nullptr};
+    int n_past = 0;        // cache 里已有多少个token
+};
+
+bool iris_kv_init(iris_kv_cache & kv);
+void iris_kv_free(iris_kv_cache & kv);
+inline void iris_kv_reset(iris_kv_cache & kv) { kv.n_past = 0;}
+
+// 增量前向：只喂n_new个新token，旧的K/V从cache读
+// 返回 ** 最后一个位置 ** 的三个head的logits（任一指针可传nullptr)
+//    logits_obs:VOCAB个 logits_rew:3  logits_end:2个
+
+void iris_wm_forward_cached(iris_model &m, iris_kv_cache & kv,
+                            const int32_t * tokens, int n_new,
+                            float * logits_obs,
+                            float * logits_rew,
+                            float * logtis_end);

@@ -475,3 +475,150 @@ void iris_ac_forward(iris_model & m, const float * frame,
     ggml_free(C); C = nullptr;
 }
 
+// =================================================================
+// KV Cache
+// =================================================================
+
+bool iris_kv_init(iris_kv_cache & kv){
+    const int HS = EMBED / N_HEAD;
+
+    ggml_init_params ip = { 32ull * 1024 * 1024, NULL, false};
+    kv.ctx = ggml_init(ip);
+    if (!kv.ctx) {fprintf(stderr,"[X] kv buf 分配失败\n"); return false;}
+
+    for (int L = 0; L < N_LAYER; L++) {
+    kv.k[L] = ggml_new_tensor_3d(kv.ctx,GGML_TYPE_F32,HS,MAX_TOK,N_HEAD);
+    kv.v[L] = ggml_new_tensor_3d(kv.ctx,GGML_TYPE_F32,HS,MAX_TOK,N_HEAD);
+    }
+    kv.n_past = 0;
+    printf("[iris] KV cache: %d 层 × 2 × [%d,%d,%d] = %.1f MB\n",
+            N_LAYER,HS,MAX_TOK,N_HEAD,
+            N_LAYER * 2.0 *HS * MAX_TOK * N_HEAD * 4 / 1048576.0);
+    return true;
+}
+
+void iris_kv_free(iris_kv_cache & kv){
+    if (kv.ctx) ggml_free(kv.ctx);
+    kv = iris_kv_cache{};
+}
+
+void iris_wm_forward_cached(iris_model & m, iris_kv_cache & kv,
+                            const int32_t * tokens, int n_new,
+                            float * logits_obs, float * logits_rew, float * logits_end){
+    const int HS = EMBED / N_HEAD;
+    const float LN_EPS = 1e-5f;
+    const int n_past = kv.n_past;
+    const int n_tot = n_past + n_new;
+    if (n_tot > MAX_TOK) {
+        fprintf(stderr, "[X] n_past(%d) + n_new(%d) 超过%d\n", n_past,n_new,MAX_TOK);
+        exit(1);
+    }
+
+    C = begin(m.buf_wm,m.buf_wm_size);
+    WC =m.wctx_wm;
+
+    // action位置重映射 -- 注意用 **绝对位置** n_past+i
+    std::vector<int32_t> tok(tokens,tokens + n_new);
+    for(int i =0; i<n_new; i++)
+        if ((n_past + i ) % TPB == TPB -1 ) tok[i] += VOCAB;
+    ggml_tensor * ids = ggml_new_tensor_1d(C,GGML_TYPE_I32,n_new);
+    memcpy(ids->data,tok.data(),n_new * sizeof(int32_t));
+
+    ggml_tensor * tbl = ggml_concat(C,W("embedder.embedding_tables.1.weight"),
+                                      W("embedder.embedding_tables.0.weight"),1);
+    ggml_tensor * x = ggml_get_rows(C,tbl,ids);
+
+    // pos_emb从第n_past行开始取n_new行
+    ggml_tensor * pos = W("pos_emb.weight");
+    x = ggml_add(C,x,ggml_view_2d(C,pos,EMBED,n_new,
+                                  pos->nb[1], (size_t)n_past * pos->nb[1]));
+    ggml_cgraph * gf = ggml_new_graph_custom(C,8192,false);
+
+    for(int L=0; L<N_LAYER; L++) {
+        ggml_tensor *h = layer_norm(x,
+                                    Wf("transformer.blocks.%d.ln1.weight",L),
+                                    Wf("transformer.blocks.%d.ln1.bias",  L), LN_EPS);
+        ggml_tensor *q = linear(Wf("transformer.blocks.%d.attn.query.weight",L),
+                                Wf("transformer.blocks.%d.attn.query.bias",  L),h);
+        ggml_tensor *k = linear(Wf("transformer.blocks.%d.attn.key.weight",  L),
+                                Wf("transformer.blocks.%d.attn.key.bias",    L),h);
+        ggml_tensor *v = linear(Wf("transformer.blocks.%d.attn.value.weight",L),
+                                Wf("transformer.blocks.%d.attn.value.bias",  L),h);
+        //---- 新K/V 写进cache的第n_past个位置 ----
+        ggml_tensor *k_new = ggml_permute(C,ggml_reshape_3d(C,k,HS,N_HEAD,n_new),0,2,1,3);
+        ggml_tensor *v_new = ggml_permute(C,ggml_reshape_3d(C,v,HS,N_HEAD,n_new),0,2,1,3);
+
+        ggml_tensor * k_dst = ggml_view_3d(C,kv.k[L],HS,n_new,N_HEAD,
+                                  kv.k[L]->nb[1],kv.k[L]->nb[2],
+                                  (size_t)n_past * kv.k[L]->nb[1]);
+        ggml_tensor * v_dst = ggml_view_3d(C,kv.v[L],HS,n_new,N_HEAD,
+                                  kv.v[L]->nb[1],kv.v[L]->nb[2],
+                                  (size_t)n_past * kv.v[L]->nb[1]);
+
+        // 先注册写入，保证它在下面的读取之前执行
+        ggml_build_forward_expand(gf,ggml_cpy(C,k_new,k_dst));
+        ggml_build_forward_expand(gf,ggml_cpy(C,v_new,v_dst));
+
+        // -------- 读 cache里全部n_tot个 --------
+        ggml_tensor * K = ggml_view_3d(C,kv.k[L],HS,n_tot,N_HEAD,
+                                 kv.k[L]->nb[1],kv.k[L]->nb[2],0);
+        ggml_tensor * Vc = ggml_view_3d(C,kv.v[L],HS,n_tot,N_HEAD,
+                                 kv.v[L]->nb[1],kv.v[L]->nb[2],0);
+        ggml_tensor * Q = ggml_permute(C,ggml_reshape_3d(C,q,HS,N_HEAD,n_new),0,2,1,3);
+
+        ggml_tensor * KQ = ggml_scale(C,ggml_mul_mat(C,K,Q),         //[n_tot,n_new,NH]
+                                      1.0f / sqrtf((float)HS));
+        KQ = ggml_soft_max(C,ggml_diag_mask_inf(C,KQ,n_past));       //<- n_past 不是0
+
+        ggml_tensor * V = ggml_cont(C,ggml_permute(C,Vc,1,0,2,3));   //[n_tot,HS,NH]
+        ggml_tensor * KQV = ggml_mul_mat(C,V,KQ);                    //[HS,n_new,NH]
+        ggml_tensor * y = ggml_cont_2d(C,ggml_permute(C,KQV,0,2,1,3),EMBED,n_new);
+
+        y = linear(Wf("transformer.blocks.%d.attn.proj.weight",L),
+                   Wf("transformer.blocks.%d.attn.proj.bias",  L),y);
+        x = ggml_add(C,x,y);
+
+        ggml_tensor * mm = layer_norm(x,
+                               Wf("transformer.blocks.%d.ln2.weight",L),
+                               Wf("transformer.blocks.%d.ln2.bias",  L),LN_EPS);
+        mm = linear(Wf("transformer.blocks.%d.mlp.0.weight",L),
+                    Wf("transformer.blocks.%d.mlp.0.bias",L),mm);
+        mm = ggml_gelu_erf(C,mm);
+        mm = linear(Wf("transformer.blocks.%d.mlp.2.weight",L),
+                    Wf("transformer.blocks.%d.mlp.2.bias",  L),mm);
+        x = ggml_add(C,x,mm);
+    }
+
+    x = layer_norm(x,W("transformer.ln_f.weight"),W("transformer.ln_f.bias"),LN_EPS);
+
+    // ---- 只取最后一个位置，三个head都算------
+    ggml_tensor * last = ggml_cont(C,ggml_view_2d(C,x,EMBED,1,
+                               x->nb[1],(size_t)(n_new -1) * x->nb[1]));
+
+    const char * hname[3] ={"head_observations","head_rewards","head_ends"};
+    ggml_tensor * head[3];
+    char nm[192];
+    for(int i=0;i<3;i++){
+        snprintf(nm,sizeof(nm),"%s.head_module.0.weight",hname[i]);
+        ggml_tensor * w0 = W(nm);
+        snprintf(nm,sizeof(nm),"%s.head_module.0.bias",  hname[i]);
+        ggml_tensor * b0 = W(nm);
+        snprintf(nm,sizeof(nm),"%s.head_module.2.weight",hname[i]);
+        ggml_tensor * w1 = W(nm);
+        snprintf(nm,sizeof(nm),"%s.head_module.2.bias",  hname[i]);
+        ggml_tensor * b1 = W(nm);
+        head[i] = linear(w1,b1,ggml_relu(C,linear(w0,b0,last)));
+    }
+
+    for(int i=0;i<3;i++) ggml_build_forward_expand(gf,head[i]);
+    ggml_graph_compute_with_ctx(C,gf,m.n_threads);
+
+    if (logits_obs) memcpy(logits_obs, head[0]->data,VOCAB * sizeof(float));
+    if (logits_rew) memcpy(logits_rew, head[1]->data,3 * sizeof(float));
+    if (logits_end) memcpy(logits_end, head[2]->data,2 * sizeof(float));
+
+    kv.n_past = n_tot;
+    ggml_free(C);C = nullptr;
+}
+
+

@@ -1,4 +1,4 @@
-// test_iris.cpp — 重构回归测试
+//test_iris.cpp — 重构回归测试
 //
 // 目的:证明 iris.cpp 抽出来的四个函数,和三个 test_*.cpp 算出同样的结果。
 // 用的是同一批 ref/*.bin,所以任何重构错误都会立刻暴露。
@@ -130,8 +130,64 @@ int main() {
         if (nbad) g_fail++;
     }
 
+    // ----------5.KV cache-------------
+    printf("\n[5] KV cache:\n");
+
+    //诊断：此刻堆还健康吗？
+    void * probe = malloc(32ull*1024*1024);
+    printf(" [probe] 32MB malloc: %s\n", probe ? "OK" : "FAILED");
+    free(probe);
+
+    iris_kv_cache kv;
+    if(!iris_kv_init(kv)) return 1;
+
+    // 全量前向的最后一个 obs位置是33，对应logits_obs的第31行
+    const float * ref_last = lo.data()+31*VOCAB;
+
+    //(a)一次喂34个
+    std::vector<float> c1(VOCAB);
+    iris_kv_reset(kv);
+    iris_wm_forward_cached(m,kv,wm_tok,34,c1.data(),nullptr,nullptr);
+    {
+        double d = 0, a = 0;
+        for(int i = 0 ;i<VOCAB; i++){
+            d = fmax(d,fabs(c1[i] - ref_last[i])); a = fmax(a,fabs(ref_last[i]));
+        }
+        printf(" 一次喂34个：maxdiff=%.3e rel=%.3e %s\n", d,d/a,d<=1e-5+1e-6 ? "PASS" : "FAIL");
+        if (d>1e-5 +1e-6*a) g_fail++;
+    }
+
+    //（b）逐个喂34次--- 这才是想象循环的实际用法
+    std::vector<float> c2(VOCAB);
+    iris_kv_reset(kv);
+    for(int i=0;i<34;i++)
+        iris_wm_forward_cached(m,kv,&wm_tok[i],1,c2.data(),nullptr,nullptr);
+    {
+        double d = 0, a = 0;
+        for(int i = 0; i< VOCAB; i++){
+            d = fmax(d,fabs(c2[i] - ref_last[i])); a = fmax(a,fabs(ref_last[i]));
+        }
+        printf(" 逐个喂34次：maxdiff=%.3e ref=%.3e %s\n", d, d/a,
+                 d <= 1e-5 + 1e-6 *a ? "PASS" : "FAIL");
+        if (d > 1e-5 + 1e-6 * a) g_fail++;
+    }
+
+    //argmax 一致性--最有意义的判据
+    {
+        int ag = 0, ar =0;
+        for(int j = 1; j<VOCAB; j++){
+            if (c2[j] > c2 [ag]) ag =j;
+            if (ref_last[j] > ref_last[ar]) ar = j;
+        }
+        printf("  argmax: cache = %d full = %d %s\n", ag,ar,ag == ar ? "PASS":"FAIL");
+        if (ag != ar) g_fail ++;
+    }
+    iris_kv_free(kv);
+
+
     printf("\n==> %s\n", g_fail == 0 ? "ALL PASS" : "FAIL");
     iris_free(m);
     return g_fail;
 }
+
 
