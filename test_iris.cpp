@@ -4,7 +4,8 @@
 // 用的是同一批 ref/*.bin,所以任何重构错误都会立刻暴露。
 //
 // 编译:
-//   g++ -std=c++17 test_iris.cpp iris.cpp //     -I /home/lhao16/ggml/include //     -L /home/lhao16/ggml/build/src //     -lggml -lggml-base -lggml-cpu //     -Wl,-rpath,/home/lhao16/ggml/build/src //     -lm -lpthread -o test_iris && ./test_iris
+//   //   g++ -std=c++17 test_iris.cpp iris.cpp //     -I /path/to/ggml/include //     -L /path/to/ggml/build/src //     -lggml -lggml-base -lggml-cpu //     -Wl,-rpath,/path/to/ggml/build/src //     -lm -lpthread -o test_iris && ./test_iris
+
 
 #include "iris.h"
 
@@ -43,10 +44,11 @@ static void cmp(const char * name, const float * got, const char * ref_path, siz
            name, n, maxd, rel, ok ? "PASS" : "FAIL");
 }
 
-int main() {
+int main(int argc, char ** argv) {
     iris_model m;
-    if (!iris_load(m, ".")) return 1;
-    m.n_threads = 8;
+    const char * dir = (argc >1 ) ? argv[1] : ".";
+    if(!iris_load(m,dir)) return 1;
+    m.n_threads = (argc >2) ? atoi(argv[2]) : 1;
     printf("[iris] n_threads = %d\n", m.n_threads);
 
     // ---------- 1. tokenizer encode ----------

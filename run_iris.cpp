@@ -43,6 +43,7 @@ int main(int argc, char ** argv) {
     const int N  = (argc > 1) ? atoi(argv[1]) : 200;
     const int NT = (argc > 2) ? atoi(argv[2]) : 8;
     const std::string MODE = (argc > 3) ? argv[3] : "actor";
+    const std::string TAG = (argc >4 ) ? argv[4] : "fp32";
 
     if (MODE != "actor" && MODE != "gate") {
         fprintf(stderr, "[X] 模式只能是 actor 或 gate\n");
@@ -55,7 +56,7 @@ int main(int argc, char ** argv) {
     fseek(f, 0, SEEK_END);
     const long total = ftell(f) / (64*64*3);
     fseek(f, 0, SEEK_SET);
-    printf("[*] trace 共 %ld 帧,本次跑 %d 帧,模式 %s\n", total, N, MODE.c_str());
+    printf("[*] trace 共 %ld 帧,本次跑 %d 帧,模式 %s, 标签 %s\n", total, N, MODE.c_str(),TAG.c_str());
     if (N > total) { fprintf(stderr, "[X] 帧数不够\n"); fclose(f); return 1; }
 
     std::vector<uint8_t> frames((size_t)N * 64*64*3);
@@ -131,7 +132,7 @@ int main(int argc, char ** argv) {
     const double t_total = ms_since(t_all);
 
     // ---- 存动作序列,供量化对比 ----
-    const std::string out = "trace/actions_fp32_" + MODE + ".bin";
+    const std::string out = "trace/actions_" + TAG+ "_" + MODE + ".bin";
     FILE * fo = fopen(out.c_str(), "wb");
     if (fo) { fwrite(actions.data(), sizeof(int32_t), N, fo); fclose(fo); }
 

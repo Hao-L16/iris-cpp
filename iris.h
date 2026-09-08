@@ -66,7 +66,7 @@ struct iris_state {
 };
 
 // ---------------- 生命周期 ----------------
-// dir 是放三个 .gguf 的目录,比如 "." 或 "/home/lhao16/iris/gguf"
+// dir 是放三个 .gguf 的目录,比如 "." 或 "../iris/gguf"
 bool iris_load(iris_model & m, const char * dir);
 void iris_free(iris_model & m);
 

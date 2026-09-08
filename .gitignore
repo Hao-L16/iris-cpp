@@ -16,3 +16,25 @@ run_iris
 test_iris
 run_iris
 test_iris
+
+# Trace data (regenerate with dump_trace_agent.py — see Appendix B)
+trace_s*/
+trace_random_old/
+# tf output records (45 files, regenerate with ./tf)
+tf_*.bin
+tf2_*.bin
+baseline_gate.bin
+rerun*.bin
+# closed-loop run outputs
+b0/
+!b0/manifest.txt
+*.log
+# analysis intermediates
+fp_margins_*.npy
+# compiled binaries
+cmp
+tf
+trace
+quantize
+dump_tokens
+dump_types
