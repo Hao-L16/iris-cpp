@@ -1,4 +1,4 @@
-GGML = /home/lhao16/ggml
+GGML ?= ../ggml
 
 CXXFLAGS = -std=c++17 -O2 -I $(GGML)/include
 LDFLAGS  = -L $(GGML)/build/src -lggml -lggml-base -lggml-cpu \
